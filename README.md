@@ -6,6 +6,33 @@ PulseHarbor is a free-key market monitor and short-window predictor designed for
 
 It is built for cron-style alert pipelines: run it frequently, forward stdout only when it prints something, and stay silent when there is no meaningful change.
 
+PulseHarbor is not a simple price alarm. It is a compact market-signal engine that tries to answer the question a human trader actually cares about: **did the situation meaningfully change?** It blends intraday price action, daily technical context, peer-relative strength, company structure, SEC filings, news risk, and forecast-state memory into concise alerts that are designed to be forwarded directly to chat.
+
+## Why PulseHarbor
+
+Most market bots are either too dumb or too loud. They trigger on a fixed percentage move, repeat the same warning every few minutes, and lose the context that made the first alert useful.
+
+PulseHarbor is built differently:
+
+- It watches the market like a monitor, but also behaves like a short-window forecaster.
+- It separates fast signals from slow context, so quote APIs, candle APIs, news APIs, and company-data APIs each have a distinct job.
+- It remembers previous forecast states and suppresses repeated alerts when nothing actionable changed.
+- It outputs ready-to-send text for Hermes, OpenClaw, and bot bridges instead of dumping raw indicator values.
+- It is intentionally free-key first, so a useful personal alert system can run without paid market-data subscriptions.
+
+## Signal Engine
+
+PulseHarbor combines several layers before it decides to speak:
+
+- **Intraday layer**: quote quality, VWAP distance, 15m trend, 1h trend, day high/low recovery, short-term support and resistance.
+- **Daily layer**: 3/5/20 day returns, daily support/resistance, ATR percentile, gap, volume anomaly, and relative strength vs major benchmarks.
+- **FMP company layer**: sector, industry, peer basket, float/liquidity structure, report dates, SEC filings, and structure-risk flags.
+- **News/event layer**: Marketaux headlines plus FMP filings/company-background factors.
+- **Forecast layer**: 15m-1h path probabilities, primary path, confirmation condition, invalidation condition, and confidence.
+- **De-duplication layer**: semantic state keys, material price displacement checks, cooldowns, and forecast-history evaluation.
+
+The result is a quieter alert stream that focuses on new information instead of repeating old anxiety.
+
 ## Free-Key First
 
 This project is designed around **completely free API keys / free-tier keys**. You do not need paid market-data subscriptions to use it.
@@ -42,6 +69,9 @@ If nothing actionable happened, the command exits silently.
 - Alert de-duplication: suppresses repeated alerts unless forecast state, key levels, or price displacement materially changes.
 - Forecast history and later evaluation data stored in a local JSON state file.
 - Optional Marketaux news factor plus FMP filings/company-background factors.
+- Cron-native silent mode: stdout stays empty when there is no alert, which keeps bot integrations clean.
+- Provider-aware fallback: missing keys, rate limits, plan-limited endpoints, and stale quotes are handled gracefully.
+- Human-readable alert cards: each alert includes thesis, action bias, context, probabilities, validation levels, and key evidence.
 
 ## Requirements
 
