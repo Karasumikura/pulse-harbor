@@ -101,6 +101,10 @@ QAP_STATE_PATH=./state/sndk_state.json
 
 在 Hermes 或 OpenClaw 中，可以把同样的命令作为定时任务；只有 stdout 非空时才发送消息。
 
+## 后续计划
+
+如果这个项目对你有帮助，欢迎 Star。PulseHarbor 后续会持续更新，接入更多有用、高质量、完全免费的 API。
+
 ## 注意
 
 这是告警和预测辅助工具，不是投资建议。免费数据 API 可能延迟、不完整、被限速或受套餐限制。脚本会把不可用的可选数据源作为 fallback 处理，并尽量继续运行。

@@ -101,6 +101,10 @@ Run every minute and forward only non-empty output:
 
 In Hermes or OpenClaw, use the same command as a scheduled task and send stdout only when stdout is non-empty.
 
+## Roadmap
+
+Stars are welcome if this project helps you. PulseHarbor will keep adding integrations for more useful, high-quality, completely free APIs.
+
 ## Notes
 
 This is an alert and forecasting aid, not financial advice. Free data APIs can be delayed, incomplete, rate-limited, or plan-limited. The script treats unavailable optional providers as fallbacks and keeps running where possible.
