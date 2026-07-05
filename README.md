@@ -14,7 +14,7 @@ Supported free-key providers:
 
 - Finnhub free API key for quotes.
 - Twelve Data free API key for quotes and candles.
-- Financial Modeling Prep free API key for quote/EOD/news fallback where your free plan allows it.
+- Financial Modeling Prep free API key for company context: profile, peers, float/liquidity, report dates, SEC filings, and selected event data where your free plan allows it.
 - Alpha Vantage free API key for daily candle fallback.
 - Marketaux free API key for simple news context.
 - Yahoo Finance fallback without an API key.
@@ -34,13 +34,14 @@ If nothing actionable happened, the command exits silently.
 
 ## Features
 
-- Multi-source quote fallback: Finnhub, Financial Modeling Prep, Twelve Data, Yahoo Finance.
-- Candle fallback: Twelve Data, FMP EOD, Alpha Vantage, Yahoo Finance.
+- Multi-source quote fallback: Finnhub, Twelve Data, Yahoo Finance, with FMP quote used only when your free plan allows it.
+- Candle fallback: Twelve Data, Yahoo Finance, Alpha Vantage, with FMP EOD used only when your free plan allows it.
 - Daily context: 3/5/20 day returns, support/resistance, ATR percentile, gap, volume anomaly, relative strength vs `SPY`, `QQQ`, and `SMH`.
+- FMP company context layer: sector/industry, peer basket, float structure, report dates, SEC filings, M&A/event hints, and structure-risk flags.
 - Prediction layer: 15m-1h path probabilities, confirmation and invalidation levels.
 - Alert de-duplication: suppresses repeated alerts unless forecast state, key levels, or price displacement materially changes.
 - Forecast history and later evaluation data stored in a local JSON state file.
-- Optional Marketaux and FMP news factor.
+- Optional Marketaux news factor plus FMP filings/company-background factors.
 
 ## Requirements
 

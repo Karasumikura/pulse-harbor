@@ -5,7 +5,7 @@ Uses quote/candle data as the monitoring layer, then emits only when the
 short-term forecast changes enough to matter.
 """
 import argparse, json, math, os, subprocess, time, urllib.parse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -159,6 +159,29 @@ def fmp_json(url, timeout=20, label='FMP'):
         if msg and any(x in msg_low for x in ('premium', 'current subscription', 'current plan', 'subscription', 'not available')):
             raise RuntimeError(f'{label} unavailable on current plan (FMP)')
     return data
+
+def fmp_stable(path, params=None, timeout=20, label='FMP'):
+    key=os.environ.get('FMP_API_KEY')
+    if not key:
+        raise RuntimeError('FMP_API_KEY missing')
+    params=dict(params or {})
+    params['apikey']=key
+    query=urllib.parse.urlencode(params)
+    url='https://financialmodelingprep.com/stable/'+path.lstrip('/')
+    if query:
+        url+='?'+query
+    return fmp_json(url, timeout, label)
+
+def first_dict(data):
+    if isinstance(data,list) and data and isinstance(data[0],dict):
+        return data[0]
+    if isinstance(data,dict):
+        return data
+    return {}
+
+def fmp_limited_error(exc):
+    msg=str(exc).lower()
+    return any(x in msg for x in ('current plan', 'premium', 'subscription', 'restricted endpoint', 'not available'))
 
 def finnhub_quote():
     symbol=current_symbol()
@@ -826,6 +849,7 @@ def daily_context(rows, price, q, old=None):
     atr_pct=atr14/price*100 if atr14 and price else None
     atr_pctile=percentile_rank(atr_series[-60:], atr14)
     news_risk=market_news_context(old.get('news_risk',{}))
+    fmp_context=fmp_company_context(old.get('fmp_context',{}))
     return {
         'ret3':ret3,'ret5':ret5,'ret20':ret20,
         'support3':support_candidates[0] if len(support_candidates)>0 else None,
@@ -847,6 +871,7 @@ def daily_context(rows, price, q, old=None):
         'rel_vs_qqq_5d':rel_vs_qqq,
         'rel_vs_spy_5d':rel_vs_spy,
         'news_risk':news_risk,
+        'fmp_context':fmp_context,
         'session':market_session(),
     }
 
@@ -905,6 +930,169 @@ def market_news_context(old=None):
         'headlines':headlines[:5],
         'errors':errors[-3:],
     }
+
+def fmp_company_context(old=None):
+    symbol=current_symbol()
+    old=old or {}
+    now=time.time()
+    try:
+        if old and now-float(old.get('updated_epoch') or 0) < 24*3600:
+            return old
+    except Exception:
+        pass
+    if not os.environ.get('FMP_API_KEY'):
+        return {'updated_epoch':now,'available':False,'errors':['FMP_API_KEY missing']}
+    errors=[]; limited=[]
+    ctx={
+        'updated_epoch':now,
+        'available':True,
+        'profile':{},
+        'peers':[],
+        'peer_relative':{},
+        'float':{},
+        'report_dates':[],
+        'sec_filings':[],
+        'mergers':[],
+        'risk_flags':[],
+        'errors':[],
+        'limited':[],
+    }
+
+    def fetch(name, path, params=None, timeout=20):
+        try:
+            return fmp_stable(path, params, timeout, 'FMP '+name)
+        except Exception as e:
+            if fmp_limited_error(e):
+                limited.append(name)
+            else:
+                errors.append(name+': '+str(e)[:120])
+            return None
+
+    profile=fetch('profile','profile',{'symbol':symbol})
+    prof=first_dict(profile)
+    if prof:
+        ctx['profile']={
+            'companyName':prof.get('companyName'),
+            'sector':prof.get('sector'),
+            'industry':prof.get('industry'),
+            'marketCap':prof.get('marketCap'),
+            'beta':prof.get('beta'),
+            'price':prof.get('price'),
+            'volume':prof.get('volume'),
+            'averageVolume':prof.get('averageVolume'),
+            'range':prof.get('range'),
+            'exchange':prof.get('exchange'),
+        }
+
+    peers=fetch('peers','stock-peers',{'symbol':symbol})
+    if isinstance(peers,list):
+        ctx['peers']=[{
+            'symbol':p.get('symbol'),
+            'companyName':p.get('companyName'),
+            'mktCap':p.get('mktCap'),
+        } for p in peers if isinstance(p,dict) and p.get('symbol')][:10]
+
+    shares=fetch('shares_float','shares-float',{'symbol':symbol})
+    sh=first_dict(shares)
+    if sh:
+        ctx['float']={
+            'freeFloat':sh.get('freeFloat'),
+            'floatShares':sh.get('floatShares'),
+            'outstandingShares':sh.get('outstandingShares'),
+            'date':sh.get('date'),
+        }
+
+    reports=fetch('report_dates','financial-reports-dates',{'symbol':symbol})
+    if isinstance(reports,list):
+        ctx['report_dates']=[{
+            'fiscalYear':r.get('fiscalYear'),
+            'period':r.get('period'),
+            'date':r.get('date') or r.get('filingDate') or r.get('acceptedDate'),
+            'linkJson':r.get('linkJson'),
+        } for r in reports if isinstance(r,dict)][:4]
+
+    to_date=datetime.now(timezone.utc).date()
+    from_date=to_date-timedelta(days=120)
+    filings=fetch('sec_filings','sec-filings-search/symbol',{
+        'symbol':symbol,
+        'from':from_date.isoformat(),
+        'to':to_date.isoformat(),
+        'page':0,
+        'limit':8,
+    })
+    if isinstance(filings,list):
+        ctx['sec_filings']=[{
+            'formType':f.get('formType'),
+            'filingDate':f.get('filingDate'),
+            'acceptedDate':f.get('acceptedDate'),
+            'link':f.get('finalLink') or f.get('link'),
+        } for f in filings if isinstance(f,dict)][:8]
+
+    mergers=fetch('mergers_latest','mergers-acquisitions-latest',{'page':0,'limit':20})
+    if isinstance(mergers,list):
+        sym=symbol.upper()
+        matched=[]
+        for m in mergers:
+            if not isinstance(m,dict):
+                continue
+            vals=[str(m.get(k) or '').upper() for k in ('symbol','targetedSymbol','companyName','targetedCompanyName')]
+            if any(sym == v or sym in v for v in vals):
+                matched.append({
+                    'symbol':m.get('symbol'),
+                    'companyName':m.get('companyName'),
+                    'targetedSymbol':m.get('targetedSymbol'),
+                    'targetedCompanyName':m.get('targetedCompanyName'),
+                    'transactionDate':m.get('transactionDate'),
+                    'acceptedDate':m.get('acceptedDate'),
+                })
+        ctx['mergers']=matched[:3]
+
+    peer_rets=[]
+    for peer in ctx['peers'][:4]:
+        ps=peer.get('symbol')
+        if not ps:
+            continue
+        try:
+            rows=candles('1day', symbol=ps)
+            closes=[r[1] for r in rows]
+            r5=pct_change(closes,5)
+            if r5 is not None:
+                peer_rets.append((ps,r5))
+        except Exception:
+            pass
+    if peer_rets:
+        avg=sum(x[1] for x in peer_rets)/len(peer_rets)
+        ctx['peer_relative']={'peer5':avg,'sample':peer_rets}
+
+    flags=[]
+    prof=ctx.get('profile') or {}
+    beta=prof.get('beta')
+    if isinstance(beta,(int,float)) and beta >= 2:
+        flags.append('高Beta，波动弹性偏大')
+    avg_vol=prof.get('averageVolume') or 0
+    vol=prof.get('volume') or 0
+    try:
+        if avg_vol and vol and vol/avg_vol >= 1.8:
+            flags.append('成交量显著高于均量')
+    except Exception:
+        pass
+    flt=ctx.get('float') or {}
+    free_float=flt.get('freeFloat')
+    float_shares=flt.get('floatShares')
+    if isinstance(free_float,(int,float)) and free_float < 30:
+        flags.append('自由流通比例偏低，挤压/跳空风险更高')
+    if isinstance(float_shares,(int,float)) and float_shares < 50_000_000:
+        flags.append('流通股本偏小，价格冲击风险更高')
+    forms=[str(f.get('formType') or '').upper() for f in ctx.get('sec_filings') or []]
+    important_forms=[f for f in forms if f in ('8-K','10-Q','10-K','S-1','424B','424B5','SC 13G','SC 13D')]
+    if important_forms:
+        flags.append('近120天存在重要SEC文件：' + '、'.join(important_forms[:3]))
+    if ctx.get('mergers'):
+        flags.append('近期M&A列表出现相关公司')
+    ctx['risk_flags']=flags[:6]
+    ctx['errors']=errors[-4:]
+    ctx['limited']=limited[-6:]
+    return ctx
 
 def ensure_tech(s):
     now=time.time(); old=s.get('tech') or {}
@@ -1310,6 +1498,31 @@ def main(argv=None):
         bottom_score_bonus_from_news=1
     else:
         bottom_score_bonus_from_news=0
+    fmp_context=daily.get('fmp_context') or {}
+    fmp_profile=fmp_context.get('profile') or {}
+    fmp_float=fmp_context.get('float') or {}
+    fmp_peer_rel=fmp_context.get('peer_relative') or {}
+    fmp_flags=fmp_context.get('risk_flags') or []
+    fmp_peer_strength_bonus=0
+    beta=fmp_profile.get('beta')
+    if isinstance(beta,(int,float)) and beta >= 2 and high_volatility:
+        risk_score+=1; risk_evidence.append('FMP背景：高Beta叠加高波动')
+    free_float=fmp_float.get('freeFloat')
+    float_shares=fmp_float.get('floatShares')
+    if isinstance(free_float,(int,float)) and free_float < 30 and high_volatility:
+        risk_score+=1; risk_evidence.append('FMP背景：自由流通比例偏低')
+    if isinstance(float_shares,(int,float)) and float_shares < 50_000_000 and high_volatility:
+        risk_score+=1; risk_evidence.append('FMP背景：流通股本偏小')
+    if fmp_flags and any(('SEC' in x or 'M&A' in x or '流通' in x) for x in fmp_flags):
+        risk_score+=1; risk_evidence.append('FMP事件/结构风险：' + fmp_flags[0])
+    peer5=fmp_peer_rel.get('peer5')
+    if daily.get('ret5') is not None and peer5 is not None:
+        rel_peer=daily['ret5']-peer5
+        daily['rel_vs_fmp_peers_5d']=rel_peer
+        if rel_peer <= -6:
+            risk_score+=1; risk_evidence.append('相对FMP同业明显弱势')
+        elif rel_peer >= 4:
+            fmp_peer_strength_bonus=1
     if macd_weak: risk_score+=1; risk_evidence.append('短线动能仍弱')
     if mfi_outflow: risk_score+=1; risk_evidence.append('资金流偏弱')
     if obv_weak: risk_score+=1; risk_evidence.append('量能趋势偏弱')
@@ -1325,6 +1538,8 @@ def main(argv=None):
     if daily.get('rel_vs_smh_5d') is not None and daily['rel_vs_smh_5d'] >= 4: bottom_score+=1; bottom_evidence.append('相对SMH转强')
     if bottom_score_bonus_from_news:
         bottom_score+=bottom_score_bonus_from_news; bottom_evidence.append('新闻/公告风险偏正面')
+    if fmp_peer_strength_bonus:
+        bottom_score+=fmp_peer_strength_bonus; bottom_evidence.append('相对FMP同业转强')
     if reclaim_lower_band: bottom_score+=1; bottom_evidence.append('脱离布林带下轨')
     if bounce_from_low >= 3: bottom_score+=2; bottom_evidence.append(f'从日内低点反弹{bounce_from_low:.2f}%')
     if bounce_from_low >= 5: bottom_score+=1; bottom_evidence.append('反弹幅度达到确认观察区')
@@ -1482,11 +1697,28 @@ def main(argv=None):
     if daily.get('volume_ratio') is not None: multi.append(f'日线量比 {daily["volume_ratio"]:.2f}x')
     if daily.get('atr_pctile') is not None: multi.append(f'ATR分位 {daily["atr_pctile"]:.0f}%')
     if daily.get('rel_vs_smh_5d') is not None: multi.append(f'相对SMH5日 {fmt_pct(daily.get("rel_vs_smh_5d"))}')
+    if daily.get('rel_vs_fmp_peers_5d') is not None: multi.append(f'相对FMP同业5日 {fmt_pct(daily.get("rel_vs_fmp_peers_5d"))}')
     if daily.get('session'): multi.append(f'时段 {daily["session"]}')
+    fmp_ctx=daily.get('fmp_context') or {}
+    fmp_bits=[]
+    fmp_prof=fmp_ctx.get('profile') or {}
+    fmp_float=fmp_ctx.get('float') or {}
+    sector=fmp_prof.get('sector') or fmp_prof.get('industry')
+    if sector: fmp_bits.append(str(sector)[:24])
+    beta=fmp_prof.get('beta')
+    if isinstance(beta,(int,float)): fmp_bits.append(f'Beta {beta:.2f}')
+    free_float=fmp_float.get('freeFloat')
+    if isinstance(free_float,(int,float)): fmp_bits.append(f'自由流通 {free_float:.1f}%')
+    peers=[p.get('symbol') for p in (fmp_ctx.get('peers') or []) if p.get('symbol')]
+    if peers: fmp_bits.append('同业 ' + '/'.join(peers[:4]))
+    if fmp_ctx.get('sec_filings'): fmp_bits.append('近120天SEC ' + str(len(fmp_ctx.get('sec_filings'))))
+    if fmp_ctx.get('risk_flags'): fmp_bits.append('结构风险 ' + '；'.join(fmp_ctx.get('risk_flags')[:2]))
+    fmp_line=('FMP背景：' + '；'.join(fmp_bits)) if fmp_bits else None
     lines=[f'{SYMBOL} {title}', thesis, action,
            f'当前价: {fmt(price)}  日内: {day_pct:+.2f}%  报价源: {q["source"]}',
            f'状态摘要：15分钟偏{trend15}；1小时{h1_state}；日线{d1_state}；' + '，'.join(context[:3]),
            ('多周期：' + '；'.join(multi)) if multi else '多周期：n/a',
+           fmp_line,
            f'预测窗口：{forecast["window"]}；主路径：{forecast["primary"]}（置信度{forecast["confidence"]}）',
            f'路径概率：{ranked}',
            f'验证条件：{forecast["confirm"]}',
@@ -1496,6 +1728,7 @@ def main(argv=None):
            '关键依据:']+[f'- {r}' for r in reasons]+[
            '预测依据:']+[f'- {r}' for r in forecast['supports']]+[
            '下次提醒：预测主路径/置信度变化、关键价位被验证或失效、或价格出现实质位移时再提醒。']
+    lines=[x for x in lines if x]
     print('\n'.join(lines))
 
 if __name__=='__main__': main()
